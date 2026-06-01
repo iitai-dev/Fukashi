@@ -7,12 +7,12 @@
   "sideEffects": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/iitai-dev/fukashi.git"
+    "url": "git+https://github.com/iitai-dev/Fukashi.git"
   },
   "bugs": {
-    "url": "https://github.com/iitai-dev/fukashi/issues"
+    "url": "https://github.com/iitai-dev/Fukashi/issues"
   },
-  "homepage": "https://github.com/iitai-dev/fukashi#readme",
+  "homepage": "https://github.com/iitai-dev/Fukashi#readme",
   "keywords": [
     "masonry",
     "react",
