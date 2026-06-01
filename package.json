@@ -1,6 +1,6 @@
 {
   "name": "fukashi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A deterministic masonry layout engine with a thin React virtualization adapter.",
   "type": "module",
   "license": "MIT",
