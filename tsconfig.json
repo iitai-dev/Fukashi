@@ -1,0 +1,38 @@
+﻿{
+    "compilerOptions":  {
+                            "target":  "ES2020",
+                            "lib":  [
+                                        "ES2020",
+                                        "DOM",
+                                        "DOM.Iterable"
+                                    ],
+                            "module":  "ESNext",
+                            "moduleResolution":  "Bundler",
+                            "jsx":  "react-jsx",
+                            "strict":  true,
+                            "declaration":  true,
+                            "declarationMap":  true,
+                            "sourceMap":  true,
+                            "outDir":  "dist",
+                            "skipLibCheck":  true,
+                            "isolatedModules":  true,
+                            "esModuleInterop":  true,
+                            "forceConsistentCasingInFileNames":  true,
+                            "rootDir":  ".",
+                            "baseUrl":  ".",
+                            "paths":  {
+                                          "fukashi":  [
+                                                          "./src/index.ts"
+                                                      ]
+                                      }
+                        },
+    "include":  [
+                    "src",
+                    "test",
+                    "examples"
+                ],
+    "exclude":  [
+                    "dist",
+                    "node_modules"
+                ]
+}
