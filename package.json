@@ -33,7 +33,7 @@
   "files": [
     "dist",
     "README.md",
-    "FUKASHI_ARCHITECTURE.md",
+    "docs/public",
     "LICENSE"
   ],
   "scripts": {
