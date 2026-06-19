@@ -93,6 +93,65 @@ export interface MasonryLayoutSeed<T = unknown> {
 
 export type MasonryLayoutSource = "empty" | "computed" | "cache" | "cache-partial";
 
+export type LayoutCachePartialReason = "append" | "remove" | "insert" | "reorder" | "size-change";
+
+export type LayoutCacheMissReason =
+  | "disabled"
+  | "storage-unavailable"
+  | "not-found"
+  | "expired"
+  | "schema-version"
+  | "algorithm-version"
+  | "cache-version"
+  | "columns"
+  | "gap"
+  | "width"
+  | "layout-params"
+  | "corrupt"
+  | "item-mismatch"
+  | "keys"
+  | "storage-error";
+
+export type LayoutCacheLoadStatus = "hit" | "partial" | "miss";
+
+export interface LayoutCacheHitResult {
+  status: "hit";
+  entry?: CachedMasonryLayout;
+  seed: MasonryLayoutSeed<unknown>;
+}
+
+export interface LayoutCachePartialResult {
+  status: "partial";
+  entry?: CachedMasonryLayout;
+  seed: MasonryLayoutSeed<unknown>;
+  validUntil: number;
+  reason: LayoutCachePartialReason;
+}
+
+export interface LayoutCacheMissResult {
+  status: "miss";
+  reason: LayoutCacheMissReason;
+}
+
+export type LayoutCacheLoadResult =
+  | LayoutCacheHitResult
+  | LayoutCachePartialResult
+  | LayoutCacheMissResult;
+
+export type LayoutCacheSaveResult =
+  | { status: "saved"; key: string; bytes: number }
+  | { status: "skipped"; reason: "disabled" | "empty" }
+  | { status: "failed"; reason: "quota" | "storage" | "serialization" };
+
+export interface MasonryCacheInfo {
+  key?: string;
+  status: "disabled" | LayoutCacheLoadStatus;
+  reason?: LayoutCacheMissReason | LayoutCachePartialReason;
+  validUntil?: number;
+  saveStatus?: LayoutCacheSaveResult["status"];
+  saveReason?: "disabled" | "empty" | "quota" | "storage" | "serialization";
+}
+
 export interface MasonryLayout<T = unknown> {
   positions: MasonryPosition<T>[];
   containerHeight: number;
@@ -105,6 +164,7 @@ export interface MasonryLayout<T = unknown> {
   itemLayoutKeys: string[];
   estimatedCount: number;
   source: MasonryLayoutSource;
+  cache: MasonryCacheInfo;
 }
 
 export interface MasonryLayoutInput<T> {
@@ -127,19 +187,13 @@ export interface LayoutCacheLoadRequest {
   itemLayoutKeys: readonly string[];
 }
 
-export type LayoutCacheLoadStatus = "hit" | "partial" | "miss";
-
-export interface LayoutCacheLoadResult {
-  status: LayoutCacheLoadStatus;
-  reason?: string;
-  validUntil?: number;
-  seed?: MasonryLayoutSeed<unknown>;
-}
-
 export interface MasonryCacheAdapter {
   load(cacheKey: string, request: LayoutCacheLoadRequest): LayoutCacheLoadResult;
-  save<T>(cacheKey: string, layout: MasonryLayout<T>): boolean;
+  save<T>(cacheKey: string, layout: MasonryLayout<T>): LayoutCacheSaveResult | boolean;
   invalidate?(cacheKey: string): void;
+  remove?(cacheKey: string): void;
+  clear?(): void;
+  prune?(): number | void;
 }
 
 export interface MasonryEngineOptions<T = unknown> {
@@ -184,6 +238,11 @@ export interface StorageLike {
   removeItem(key: string): void;
 }
 
+export interface LayoutCacheErrorContext {
+  operation: "load" | "save" | "remove" | "clear" | "prune";
+  key?: string;
+}
+
 export interface LayoutCacheOptions {
   namespace?: string;
   storage?: StorageLike | null;
@@ -191,18 +250,28 @@ export interface LayoutCacheOptions {
   maxEntries?: number;
   algorithmVersion?: string;
   now?: () => number;
+  onError?: (error: unknown, context: LayoutCacheErrorContext) => void;
+}
+
+export interface LayoutCacheCheckpoint {
+  index: number;
+  columnHeights: readonly number[];
 }
 
 export interface CachedMasonryLayout {
   schemaVersion: 1;
   algorithmVersion: string;
   createdAt: number;
-  touchedAt: number;
+  updatedAt: number;
+  touchedAt?: number;
+  expiresAt: number | null;
+  cacheKey: string;
   signature: LayoutSignature;
   itemKeys: string[];
   itemLayoutKeys: string[];
   positions: MasonrySeedPosition[];
   columnHeights: number[];
+  checkpoints: LayoutCacheCheckpoint[];
   containerHeight: number;
 }
 
@@ -241,7 +310,9 @@ export interface UseMasonryResult<T> {
   visibleItems: MasonryVisibleItem<T>[];
   viewport: RectViewport;
   status: MasonryStatus;
+  cache: MasonryCacheInfo;
   refresh: () => void;
+  invalidateCache: () => void;
   containerStyle: React.CSSProperties;
 }
 

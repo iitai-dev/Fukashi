@@ -103,6 +103,19 @@ export function useMasonry<T>(options: UseMasonryOptions<T>): UseMasonryResult<T
     viewport.refresh();
   }, [measured, viewport]);
 
+  const invalidateCache = useCallback(() => {
+    if (!options.cache || !options.cacheKey) {
+      return;
+    }
+
+    if (options.cache.invalidate) {
+      options.cache.invalidate(options.cacheKey);
+      return;
+    }
+
+    options.cache.remove?.(options.cacheKey);
+  }, [options.cache, options.cacheKey]);
+
   const status = options.disabled
     ? "disabled"
     : width <= 0
@@ -117,7 +130,9 @@ export function useMasonry<T>(options: UseMasonryOptions<T>): UseMasonryResult<T
     visibleItems,
     viewport,
     status,
+    cache: layout.cache,
     refresh,
+    invalidateCache,
     containerStyle: {
       position: "relative",
       width: "100%",

@@ -1,4 +1,4 @@
-﻿// @vitest-environment node
+// @vitest-environment node
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { MasonryGrid } from "../src";
@@ -17,6 +17,6 @@ describe("MasonryGrid", () => {
     );
 
     expect(html).toContain("data-fukashi");
+    expect(html).toContain("data-fukashi-cache-status");
   });
 });
-

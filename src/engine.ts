@@ -1,6 +1,9 @@
 import {
+  type LayoutCacheLoadResult,
+  type LayoutCacheSaveResult,
   type LayoutSignature,
   type MasonryCacheAdapter,
+  type MasonryCacheInfo,
   type MasonryColumns,
   type MasonryEngineLayoutInput,
   type MasonryEngineOptions,
@@ -8,7 +11,6 @@ import {
   type MasonryGap,
   type MasonryItemLayoutKeyGetter,
   type MasonryItemSize,
-  type MasonryItemSizeGetter,
   type MasonryLayout,
   type MasonryLayoutInput,
   type MasonryLayoutSeed,
@@ -33,6 +35,43 @@ interface PreparedLayout<T> {
   itemLayoutKeys: string[];
   sizes: Array<MasonryItemSize | null>;
   signature: LayoutSignature;
+}
+
+function disabledCacheInfo(): MasonryCacheInfo {
+  return { status: "disabled", reason: "disabled" };
+}
+
+function cacheInfoFromLoad(cacheKey: string, result: LayoutCacheLoadResult): MasonryCacheInfo {
+  if (result.status === "hit") {
+    return { key: cacheKey, status: "hit", validUntil: result.seed.validUntil };
+  }
+
+  if (result.status === "partial") {
+    return {
+      key: cacheKey,
+      status: "partial",
+      reason: result.reason,
+      validUntil: result.validUntil
+    };
+  }
+
+  return { key: cacheKey, status: "miss", reason: result.reason };
+}
+
+function applySaveInfo(info: MasonryCacheInfo, result: LayoutCacheSaveResult | boolean): MasonryCacheInfo {
+  if (typeof result === "boolean") {
+    return {
+      ...info,
+      saveStatus: result ? "saved" : "failed",
+      saveReason: result ? undefined : "storage"
+    };
+  }
+
+  return {
+    ...info,
+    saveStatus: result.status,
+    saveReason: "reason" in result ? result.reason : undefined
+  };
 }
 
 function finitePixel(value: unknown, fallback: number): number {
@@ -258,7 +297,8 @@ function computeContainerHeight(columnHeights: number[], gapY: number, hasItems:
 function computePreparedLayout<T>(
   prepared: PreparedLayout<T>,
   seed: MasonryLayoutSeed<T> | null | undefined,
-  sourceOverride?: MasonryLayoutSource
+  sourceOverride?: MasonryLayoutSource,
+  cache: MasonryCacheInfo = disabledCacheInfo()
 ): MasonryLayout<T> {
   const { columns, gap, input, itemKeys, itemLayoutKeys, items, signature, sizes } = prepared;
   const columnCount = columns.count;
@@ -280,7 +320,8 @@ function computePreparedLayout<T>(
       itemKeys,
       itemLayoutKeys,
       estimatedCount: 0,
-      source: "empty"
+      source: "empty",
+      cache
     };
   }
 
@@ -376,7 +417,8 @@ function computePreparedLayout<T>(
     itemKeys,
     itemLayoutKeys,
     estimatedCount,
-    source
+    source,
+    cache
   };
 }
 
@@ -404,27 +446,45 @@ export class MasonryEngine<T = unknown> {
     const cacheKey = input.cacheKey ?? this.defaults.cacheKey;
     let seed = input.seed ?? null;
     let sourceOverride: MasonryLayoutSource | undefined;
+    let cacheInfo = disabledCacheInfo();
 
-    if (!seed && cache && cacheKey) {
+    if (cache && cacheKey) {
       const hit = cache.load(cacheKey, {
         signature: prepared.signature,
         itemKeys: prepared.itemKeys,
         itemLayoutKeys: prepared.itemLayoutKeys
       });
 
-      if (hit.seed) {
+      cacheInfo = cacheInfoFromLoad(cacheKey, hit);
+
+      if (hit.status !== "miss") {
         seed = hit.seed as MasonryLayoutSeed<T>;
         sourceOverride = hit.status === "hit" ? "cache" : "cache-partial";
       }
     }
 
-    const layout = computePreparedLayout(prepared, seed, sourceOverride);
+    const layout = computePreparedLayout(prepared, seed, sourceOverride, cacheInfo);
 
     if (cache && cacheKey && layout.source !== "empty") {
-      cache.save(cacheKey, layout);
+      layout.cache = applySaveInfo(layout.cache, cache.save(cacheKey, layout));
     }
 
     return layout;
+  }
+
+  invalidate(cacheKey = this.defaults.cacheKey): void {
+    const cache = this.defaults.cache;
+
+    if (!cache || !cacheKey) {
+      return;
+    }
+
+    if (cache.invalidate) {
+      cache.invalidate(cacheKey);
+      return;
+    }
+
+    cache.remove?.(cacheKey);
   }
 }
 

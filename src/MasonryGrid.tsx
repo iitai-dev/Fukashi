@@ -32,6 +32,7 @@ export function MasonryGrid<T>(props: MasonryGridProps<T>) {
       style={{ ...masonry.containerStyle, ...style }}
       data-fukashi=""
       data-fukashi-status={masonry.status}
+      data-fukashi-cache-status={masonry.cache.status}
     >
       {masonry.visibleItems.map((visible) => {
         const context: MasonryRenderContext<T> = {

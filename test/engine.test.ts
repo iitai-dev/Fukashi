@@ -36,6 +36,7 @@ describe("computeMasonryLayout", () => {
     expect(layout.positions.map((position) => position.column)).toEqual([0, 1, 0, 0]);
     expect(layout.positions.map((position) => position.y)).toEqual([0, 0, 110, 170]);
     expect(layout.containerHeight).toBe(270);
+    expect(layout.cache.status).toBe("disabled");
   });
 
   it("returns an empty layout for unmeasured widths", () => {
@@ -134,7 +135,29 @@ describe("MasonryEngine", () => {
     const second = engine.compute(input);
 
     expect(first.source).toBe("computed");
+    expect(first.cache.status).toBe("miss");
+    expect(first.cache.saveStatus).toBe("saved");
     expect(second.source).toBe("cache");
+    expect(second.cache.status).toBe("hit");
     expect(second.positions.map((position) => position.y)).toEqual(first.positions.map((position) => position.y));
+  });
+
+  it("invalidates through the engine helper", () => {
+    const storage = new MemoryStorage();
+    const cache = createLayoutCache({ namespace: "test", storage });
+    const engine = new MasonryEngine<Item>({ cache, cacheKey: "gallery" });
+    const input = {
+      items,
+      width: 210,
+      columns: 2,
+      gap: 10,
+      getKey,
+      getItemSize
+    };
+
+    engine.compute(input);
+    expect(engine.compute(input).cache.status).toBe("hit");
+    engine.invalidate();
+    expect(engine.compute(input).cache.status).toBe("miss");
   });
 });

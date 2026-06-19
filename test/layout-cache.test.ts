@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { computeMasonryLayout, createLayoutCache, MasonryEngine } from "../src";
 import { MemoryStorage } from "./memory-storage";
 
@@ -23,7 +23,8 @@ describe("LayoutCache", () => {
     const cache = createLayoutCache({ namespace: "cache", storage });
     const layout = computeMasonryLayout(input);
 
-    expect(cache.save("gallery", layout)).toBe(true);
+    const saved = cache.save("gallery", layout);
+    expect(saved.status).toBe("saved");
 
     const hit = cache.load("gallery", {
       signature: layout.signature,
@@ -32,10 +33,12 @@ describe("LayoutCache", () => {
     });
 
     expect(hit.status).toBe("hit");
-    expect(hit.seed?.validUntil).toBe(items.length);
+    if (hit.status !== "hit") throw new Error("expected cache hit");
+    expect(hit.seed.validUntil).toBe(items.length);
+    expect(hit.entry?.checkpoints.length).toBeGreaterThan(0);
   });
 
-  it("returns a partial hit for shared prefixes", () => {
+  it("returns append partial hits for shared prefixes", () => {
     const storage = new MemoryStorage();
     const cache = createLayoutCache({ namespace: "cache", storage });
     const layout = computeMasonryLayout(input);
@@ -51,12 +54,43 @@ describe("LayoutCache", () => {
     });
 
     expect(hit.status).toBe("partial");
-    expect(hit.seed?.validUntil).toBe(items.length);
+    if (hit.status !== "partial") throw new Error("expected partial cache hit");
+    expect(hit.reason).toBe("append");
+    expect(hit.seed.validUntil).toBe(items.length);
   });
 
-  it("fails closed when storage throws", () => {
+  it("classifies size-change partial hits", () => {
+    const storage = new MemoryStorage();
+    const cache = createLayoutCache({ namespace: "cache", storage });
+    const layout = computeMasonryLayout(input);
+    const changed = computeMasonryLayout({
+      ...input,
+      items: [
+        items[0],
+        { id: "b", size: { width: 100, height: 300 } },
+        items[2]
+      ]
+    });
+
+    cache.save("gallery", layout);
+
+    const hit = cache.load("gallery", {
+      signature: changed.signature,
+      itemKeys: changed.itemKeys,
+      itemLayoutKeys: changed.itemLayoutKeys
+    });
+
+    expect(hit.status).toBe("partial");
+    if (hit.status !== "partial") throw new Error("expected partial cache hit");
+    expect(hit.reason).toBe("size-change");
+    expect(hit.validUntil).toBe(1);
+  });
+
+  it("fails closed and reports storage errors", () => {
+    const onError = vi.fn();
     const cache = createLayoutCache({
       namespace: "bad",
+      onError,
       storage: {
         getItem: () => {
           throw new Error("nope");
@@ -69,7 +103,7 @@ describe("LayoutCache", () => {
     });
     const layout = computeMasonryLayout(input);
 
-    expect(cache.save("gallery", layout)).toBe(false);
+    expect(cache.save("gallery", layout)).toEqual({ status: "failed", reason: "storage" });
     expect(
       cache.load("gallery", {
         signature: layout.signature,
@@ -77,9 +111,27 @@ describe("LayoutCache", () => {
         itemLayoutKeys: layout.itemLayoutKeys
       }).status
     ).toBe("miss");
+    expect(onError).toHaveBeenCalled();
   });
 
-  it("lets MasonryEngine reuse a partial cache prefix", () => {
+  it("invalidates cached layouts", () => {
+    const storage = new MemoryStorage();
+    const cache = createLayoutCache({ namespace: "cache", storage });
+    const layout = computeMasonryLayout(input);
+
+    cache.save("gallery", layout);
+    cache.invalidate("gallery");
+
+    const hit = cache.load("gallery", {
+      signature: layout.signature,
+      itemKeys: layout.itemKeys,
+      itemLayoutKeys: layout.itemLayoutKeys
+    });
+
+    expect(hit).toEqual({ status: "miss", reason: "not-found" });
+  });
+
+  it("lets MasonryEngine expose partial cache status", () => {
     const storage = new MemoryStorage();
     const cache = createLayoutCache({ namespace: "engine", storage });
     const engine = new MasonryEngine<(typeof items)[number]>({ cache, cacheKey: "gallery" });
@@ -92,7 +144,9 @@ describe("LayoutCache", () => {
     });
 
     expect(next.source).toBe("cache-partial");
+    expect(next.cache.status).toBe("partial");
+    expect(next.cache.reason).toBe("append");
+    expect(next.cache.saveStatus).toBe("saved");
     expect(next.positions).toHaveLength(4);
   });
 });
-

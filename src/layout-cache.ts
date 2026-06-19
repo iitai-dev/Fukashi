@@ -1,8 +1,11 @@
-﻿import type {
+import type {
   CachedMasonryLayout,
   LayoutCacheLoadRequest,
   LayoutCacheLoadResult,
+  LayoutCacheMissReason,
   LayoutCacheOptions,
+  LayoutCachePartialReason,
+  LayoutCacheSaveResult,
   MasonryLayout,
   MasonrySeedPosition,
   StorageLike
@@ -12,6 +15,7 @@ const SCHEMA_VERSION = 1;
 const DEFAULT_NAMESPACE = "fukashi";
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 25;
+const CHECKPOINT_INTERVAL = 128;
 
 function getDefaultStorage(): StorageLike | null {
   try {
@@ -40,6 +44,33 @@ function stripPositions<T>(layout: MasonryLayout<T>): MasonrySeedPosition[] {
   }));
 }
 
+function createCheckpoints(
+  positions: MasonrySeedPosition[],
+  columnCount: number,
+  gapY: number
+) {
+  const checkpoints: Array<{ index: number; columnHeights: number[] }> = [];
+  const columnHeights = Array.from({ length: columnCount }, () => 0);
+
+  for (let index = 0; index < positions.length; index += 1) {
+    const position = positions[index];
+
+    if (position.column >= 0 && position.column < columnCount) {
+      columnHeights[position.column] = Math.max(
+        columnHeights[position.column],
+        position.y + position.height + gapY
+      );
+    }
+
+    const count = index + 1;
+    if (count % CHECKPOINT_INTERVAL === 0 || count === positions.length) {
+      checkpoints.push({ index: count, columnHeights: [...columnHeights] });
+    }
+  }
+
+  return checkpoints;
+}
+
 function deriveSeedMetrics(
   positions: MasonrySeedPosition[],
   columnCount: number,
@@ -64,22 +95,89 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
 }
 
-function parseEntry(raw: string | null): CachedMasonryLayout | null {
+function asStringArray(value: unknown): string[] | null {
+  return Array.isArray(value) ? value.map((item) => String(item)) : null;
+}
+
+function asNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeEntry(parsed: unknown, cacheKey: string): CachedMasonryLayout | null {
+  if (!isRecord(parsed) || parsed.schemaVersion !== SCHEMA_VERSION || !isRecord(parsed.signature)) {
+    return null;
+  }
+
+  const itemKeys = asStringArray(parsed.itemKeys);
+  const itemLayoutKeys = asStringArray(parsed.itemLayoutKeys);
+
+  if (!itemKeys || !itemLayoutKeys || !Array.isArray(parsed.positions) || !Array.isArray(parsed.columnHeights)) {
+    return null;
+  }
+
+  const createdAt = asNumber(parsed.createdAt, Date.now());
+  const updatedAt = asNumber(parsed.updatedAt, asNumber(parsed.touchedAt, createdAt));
+  const expiresAt = typeof parsed.expiresAt === "number" || parsed.expiresAt === null ? parsed.expiresAt : null;
+  const checkpoints = Array.isArray(parsed.checkpoints) ? parsed.checkpoints : [];
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    algorithmVersion: String(parsed.algorithmVersion ?? parsed.signature.algorithmVersion ?? ""),
+    createdAt,
+    updatedAt,
+    touchedAt: updatedAt,
+    expiresAt,
+    cacheKey: String(parsed.cacheKey ?? cacheKey),
+    signature: parsed.signature as unknown as CachedMasonryLayout["signature"],
+    itemKeys,
+    itemLayoutKeys,
+    positions: parsed.positions as MasonrySeedPosition[],
+    columnHeights: parsed.columnHeights as number[],
+    checkpoints: checkpoints as CachedMasonryLayout["checkpoints"],
+    containerHeight: asNumber(parsed.containerHeight, 0)
+  };
+}
+
+function parseJson(raw: string | null): unknown {
   if (!raw) {
     return null;
   }
 
-  try {
-    const parsed = JSON.parse(raw) as unknown;
+  return JSON.parse(raw) as unknown;
+}
 
-    if (!isRecord(parsed) || parsed.schemaVersion !== SCHEMA_VERSION) {
-      return null;
-    }
-
-    return parsed as unknown as CachedMasonryLayout;
-  } catch {
-    return null;
+function classifyPartial(
+  entry: CachedMasonryLayout,
+  request: LayoutCacheLoadRequest,
+  validUntil: number
+): LayoutCachePartialReason {
+  if (validUntil === entry.itemKeys.length && request.itemKeys.length > entry.itemKeys.length) {
+    return "append";
   }
+
+  if (validUntil === request.itemKeys.length && request.itemKeys.length < entry.itemKeys.length) {
+    return "remove";
+  }
+
+  if (
+    entry.itemKeys[validUntil] === request.itemKeys[validUntil] &&
+    entry.itemLayoutKeys[validUntil] !== request.itemLayoutKeys[validUntil]
+  ) {
+    return "size-change";
+  }
+
+  const cachedKey = entry.itemKeys[validUntil];
+  const currentKey = request.itemKeys[validUntil];
+
+  if (cachedKey && request.itemKeys.indexOf(cachedKey, validUntil + 1) !== -1) {
+    return "insert";
+  }
+
+  if (currentKey && entry.itemKeys.indexOf(currentKey, validUntil + 1) !== -1) {
+    return "remove";
+  }
+
+  return "reorder";
 }
 
 export class LayoutCache {
@@ -89,6 +187,7 @@ export class LayoutCache {
   private readonly maxEntries: number;
   private readonly algorithmVersion?: string;
   private readonly now: () => number;
+  private readonly onError?: LayoutCacheOptions["onError"];
 
   constructor(options: LayoutCacheOptions | string = {}) {
     const normalized = typeof options === "string" ? { namespace: options } : options;
@@ -98,10 +197,27 @@ export class LayoutCache {
     this.maxEntries = normalized.maxEntries ?? DEFAULT_MAX_ENTRIES;
     this.algorithmVersion = normalized.algorithmVersion;
     this.now = normalized.now ?? (() => Date.now());
+    this.onError = normalized.onError;
   }
 
   private storageKey(cacheKey: string): string {
     return this.namespace + ":" + cacheKey;
+  }
+
+  private expiresAt(now: number): number | null {
+    return Number.isFinite(this.ttlMs) ? now + this.ttlMs : null;
+  }
+
+  private isExpired(entry: CachedMasonryLayout, now: number): boolean {
+    return entry.expiresAt == null ? now - entry.createdAt > this.ttlMs : now > entry.expiresAt;
+  }
+
+  private report(error: unknown, operation: "load" | "save" | "remove" | "clear" | "prune", key?: string): void {
+    try {
+      this.onError?.(error, { operation, key });
+    } catch {
+      return;
+    }
   }
 
   load(cacheKey: string, request: LayoutCacheLoadRequest): LayoutCacheLoadResult {
@@ -109,35 +225,58 @@ export class LayoutCache {
       return { status: "miss", reason: "storage-unavailable" };
     }
 
-    try {
-      const key = this.storageKey(cacheKey);
-      const entry = parseEntry(this.storage.getItem(key));
+    const key = this.storageKey(cacheKey);
 
-      if (!entry) {
+    try {
+      const raw = this.storage.getItem(key);
+
+      if (!raw) {
         return { status: "miss", reason: "not-found" };
       }
 
-      if (this.now() - entry.createdAt > this.ttlMs) {
+      const parsed = parseJson(raw);
+
+      if (!isRecord(parsed)) {
+        this.storage.removeItem(key);
+        return { status: "miss", reason: "corrupt" };
+      }
+
+      if (parsed.schemaVersion !== SCHEMA_VERSION) {
+        return { status: "miss", reason: "schema-version" };
+      }
+
+      const entry = normalizeEntry(parsed, cacheKey);
+
+      if (!entry) {
+        this.storage.removeItem(key);
+        return { status: "miss", reason: "corrupt" };
+      }
+
+      if (this.isExpired(entry, this.now())) {
         this.storage.removeItem(key);
         return { status: "miss", reason: "expired" };
       }
 
-      if (this.algorithmVersion && entry.algorithmVersion !== this.algorithmVersion) {
+      if (
+        (this.algorithmVersion && entry.algorithmVersion !== this.algorithmVersion) ||
+        entry.signature.algorithmVersion !== request.signature.algorithmVersion
+      ) {
         return { status: "miss", reason: "algorithm-version" };
       }
 
-      const signature = request.signature;
-      const cached = entry.signature;
+      if (entry.signature.columnCount !== request.signature.columnCount) {
+        return { status: "miss", reason: "columns" };
+      }
+
+      if (entry.signature.gapX !== request.signature.gapX || entry.signature.gapY !== request.signature.gapY) {
+        return { status: "miss", reason: "gap" };
+      }
 
       if (
-        cached.algorithmVersion !== signature.algorithmVersion ||
-        cached.width !== signature.width ||
-        cached.columnCount !== signature.columnCount ||
-        cached.columnWidth !== signature.columnWidth ||
-        cached.gapX !== signature.gapX ||
-        cached.gapY !== signature.gapY
+        entry.signature.width !== request.signature.width ||
+        entry.signature.columnWidth !== request.signature.columnWidth
       ) {
-        return { status: "miss", reason: "layout-params" };
+        return { status: "miss", reason: "width" };
       }
 
       const limit = Math.min(
@@ -160,7 +299,7 @@ export class LayoutCache {
       }
 
       if (validUntil === 0) {
-        return { status: "miss", reason: "keys" };
+        return { status: "miss", reason: "item-mismatch" };
       }
 
       const isFullHit =
@@ -170,7 +309,7 @@ export class LayoutCache {
       const positions = entry.positions.slice(0, validUntil);
       const metrics = isFullHit
         ? { columnHeights: entry.columnHeights, containerHeight: entry.containerHeight }
-        : deriveSeedMetrics(positions, signature.columnCount, signature.gapY);
+        : deriveSeedMetrics(positions, request.signature.columnCount, request.signature.gapY);
       const seed = {
         positions,
         columnHeights: metrics.columnHeights,
@@ -180,56 +319,89 @@ export class LayoutCache {
         source: isFullHit ? "cache" : "cache-partial"
       } as const;
 
-      entry.touchedAt = this.now();
-      this.storage.setItem(key, JSON.stringify(entry));
+      const touched: CachedMasonryLayout = {
+        ...entry,
+        updatedAt: this.now(),
+        touchedAt: this.now()
+      };
+      this.storage.setItem(key, JSON.stringify(touched));
+
+      if (isFullHit) {
+        return { status: "hit", entry: touched, seed };
+      }
 
       return {
-        status: isFullHit ? "hit" : "partial",
+        status: "partial",
+        entry: touched,
         validUntil,
+        reason: classifyPartial(entry, request, validUntil),
         seed
       };
-    } catch {
+    } catch (error) {
+      this.report(error, "load", key);
       return { status: "miss", reason: "storage-error" };
     }
   }
 
-  save<T>(cacheKey: string, layout: MasonryLayout<T>): boolean {
+  save<T>(cacheKey: string, layout: MasonryLayout<T>): LayoutCacheSaveResult {
     if (!this.storage) {
-      return false;
+      return { status: "skipped", reason: "disabled" };
     }
+
+    if (layout.positions.length === 0) {
+      return { status: "skipped", reason: "empty" };
+    }
+
+    const key = this.storageKey(cacheKey);
 
     try {
       const now = this.now();
+      const positions = stripPositions(layout);
       const entry: CachedMasonryLayout = {
         schemaVersion: SCHEMA_VERSION,
         algorithmVersion: layout.signature.algorithmVersion,
         createdAt: now,
+        updatedAt: now,
         touchedAt: now,
+        expiresAt: this.expiresAt(now),
+        cacheKey,
         signature: layout.signature,
         itemKeys: layout.itemKeys,
         itemLayoutKeys: layout.itemLayoutKeys,
-        positions: stripPositions(layout),
+        positions,
         columnHeights: layout.columnHeights,
+        checkpoints: createCheckpoints(positions, layout.columnCount, layout.gap.y),
         containerHeight: layout.containerHeight
       };
+      const serialized = JSON.stringify(entry);
 
-      this.storage.setItem(this.storageKey(cacheKey), JSON.stringify(entry));
+      this.storage.setItem(key, serialized);
       this.prune();
-      return true;
-    } catch {
-      return false;
+
+      return { status: "saved", key, bytes: serialized.length };
+    } catch (error) {
+      this.report(error, "save", key);
+      const message = error instanceof Error ? error.message.toLowerCase() : "";
+      const reason = message.includes("quota") ? "quota" : "storage";
+      return { status: "failed", reason };
     }
   }
 
   invalidate(cacheKey: string): void {
+    this.remove(cacheKey);
+  }
+
+  remove(cacheKey: string): void {
     if (!this.storage) {
       return;
     }
 
+    const key = this.storageKey(cacheKey);
+
     try {
-      this.storage.removeItem(this.storageKey(cacheKey));
-    } catch {
-      return;
+      this.storage.removeItem(key);
+    } catch (error) {
+      this.report(error, "remove", key);
     }
   }
 
@@ -240,50 +412,64 @@ export class LayoutCache {
 
     const keys: string[] = [];
 
-    for (let index = 0; index < this.storage.length; index += 1) {
-      const key = this.storage.key(index);
+    try {
+      for (let index = 0; index < this.storage.length; index += 1) {
+        const key = this.storage.key(index);
 
-      if (key && key.startsWith(this.namespace + ":")) {
-        keys.push(key);
+        if (key && key.startsWith(this.namespace + ":")) {
+          keys.push(key);
+        }
       }
-    }
 
-    for (const key of keys) {
-      this.storage.removeItem(key);
+      for (const key of keys) {
+        this.storage.removeItem(key);
+      }
+    } catch (error) {
+      this.report(error, "clear");
     }
   }
 
-  prune(): void {
+  prune(): number {
     if (!this.storage || typeof this.storage.length !== "number" || !this.storage.key) {
-      return;
+      return 0;
     }
 
-    const entries: Array<{ key: string; touchedAt: number }> = [];
+    const entries: Array<{ key: string; updatedAt: number }> = [];
+    let removed = 0;
 
-    for (let index = 0; index < this.storage.length; index += 1) {
-      const key = this.storage.key(index);
+    try {
+      for (let index = 0; index < this.storage.length; index += 1) {
+        const key = this.storage.key(index);
 
-      if (!key || !key.startsWith(this.namespace + ":")) {
-        continue;
+        if (!key || !key.startsWith(this.namespace + ":")) {
+          continue;
+        }
+
+        const entry = normalizeEntry(parseJson(this.storage.getItem(key)), key.slice(this.namespace.length + 1));
+
+        if (!entry || this.isExpired(entry, this.now())) {
+          this.storage.removeItem(key);
+          removed += 1;
+        } else {
+          entries.push({ key, updatedAt: entry.updatedAt });
+        }
       }
 
-      const entry = parseEntry(this.storage.getItem(key));
+      entries.sort((a, b) => a.updatedAt - b.updatedAt);
 
-      if (!entry || this.now() - entry.createdAt > this.ttlMs) {
-        this.storage.removeItem(key);
-      } else {
-        entries.push({ key, touchedAt: entry.touchedAt });
+      while (entries.length > this.maxEntries) {
+        const oldest = entries.shift();
+
+        if (oldest) {
+          this.storage.removeItem(oldest.key);
+          removed += 1;
+        }
       }
-    }
 
-    entries.sort((a, b) => a.touchedAt - b.touchedAt);
-
-    while (entries.length > this.maxEntries) {
-      const oldest = entries.shift();
-
-      if (oldest) {
-        this.storage.removeItem(oldest.key);
-      }
+      return removed;
+    } catch (error) {
+      this.report(error, "prune");
+      return removed;
     }
   }
 }
@@ -291,4 +477,3 @@ export class LayoutCache {
 export function createLayoutCache(options: LayoutCacheOptions | string = {}): LayoutCache {
   return new LayoutCache(options);
 }
-
