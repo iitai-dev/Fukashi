@@ -86,6 +86,29 @@ describe("LayoutCache", () => {
     expect(hit.validUntil).toBe(1);
   });
 
+  it("classifies adjacent swaps as reorder partial hits", () => {
+    const storage = new MemoryStorage();
+    const cache = createLayoutCache({ namespace: "cache", storage });
+    const layout = computeMasonryLayout(input);
+    const reordered = computeMasonryLayout({
+      ...input,
+      items: [items[0], items[2], items[1]]
+    });
+
+    cache.save("gallery", layout);
+
+    const hit = cache.load("gallery", {
+      signature: reordered.signature,
+      itemKeys: reordered.itemKeys,
+      itemLayoutKeys: reordered.itemLayoutKeys
+    });
+
+    expect(hit.status).toBe("partial");
+    if (hit.status !== "partial") throw new Error("expected partial cache hit");
+    expect(hit.reason).toBe("reorder");
+    expect(hit.validUntil).toBe(1);
+  });
+
   it("fails closed and reports storage errors", () => {
     const onError = vi.fn();
     const cache = createLayoutCache({

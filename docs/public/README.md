@@ -4,6 +4,7 @@ These docs cover the supported public API and usage patterns for Fukashi.
 
 - [API reference](API.md)
 - [React guide](REACT.md)
+- [Stress testing](STRESS_TESTING.md)
 
 ## Package Shape
 

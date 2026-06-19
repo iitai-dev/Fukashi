@@ -168,12 +168,18 @@ function classifyPartial(
 
   const cachedKey = entry.itemKeys[validUntil];
   const currentKey = request.itemKeys[validUntil];
+  const cachedKeyMovedLater = Boolean(cachedKey && request.itemKeys.indexOf(cachedKey, validUntil + 1) !== -1);
+  const currentKeyMovedLater = Boolean(currentKey && entry.itemKeys.indexOf(currentKey, validUntil + 1) !== -1);
 
-  if (cachedKey && request.itemKeys.indexOf(cachedKey, validUntil + 1) !== -1) {
+  if (cachedKeyMovedLater && currentKeyMovedLater) {
+    return "reorder";
+  }
+
+  if (cachedKeyMovedLater) {
     return "insert";
   }
 
-  if (currentKey && entry.itemKeys.indexOf(currentKey, validUntil + 1) !== -1) {
+  if (currentKeyMovedLater) {
     return "remove";
   }
 
